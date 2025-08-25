@@ -1,0 +1,4 @@
+dependencies: \
+  /Users/entroplay/Desktop/Docs/Entroplay/Dev/of_v0.12.1_ios_release/addons/ofxARKit/src/lib/Shaders.metal \
+  /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/metal/32023/lib/clang/32023.620/include/metal/module.modulemap \
+  /Users/entroplay/Desktop/Docs/Entroplay/Dev/of_v0.12.1_ios_release/addons/ofxARKit/src/lib/ShaderTypes.h
