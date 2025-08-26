@@ -39,7 +39,7 @@ void ofApp::setup() {
     
     processor = ARProcessor::create(session);
     processor->setup();
-
+	cout << "this is og branch not main" << endl;
     
 }
 
