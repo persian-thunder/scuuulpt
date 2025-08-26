@@ -1,0 +1,4 @@
+Target dependency graph (2 targets)
+Target 'Scuuulpt' in project 'Scuuulpt'
+➜ Explicit dependency on target 'openFrameworks' in project 'iOS+OFLib'
+Target 'openFrameworks' in project 'iOS+OFLib' (no dependencies)
