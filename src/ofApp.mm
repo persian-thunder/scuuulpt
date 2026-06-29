@@ -52,8 +52,8 @@ void ofApp::update(){
 		bodyFbo.allocate(ofGetWidth(), ofGetHeight());
 		fboAllocated = true;
 	}
-	
-	
+
+
     processor->update();
     
                 
@@ -90,6 +90,7 @@ void ofApp::draw() {
             
 			//here we iterate through all of our anchors that we placed in touchDown
 			for (auto& anchorWithFbo: anchorsWithFBOs) {
+				if(!anchorWithFbo.anchor || !anchorWithFbo.fbo) continue; // empty ring slot
 				ofPushMatrix();
 				ofMatrix4x4 mat = convert<matrix_float4x4, ofMatrix4x4>(anchorWithFbo.anchor.transform);
 				ofMultMatrix(mat);
@@ -98,7 +99,7 @@ void ofApp::draw() {
 				ofScale(-1,1,1);
 
 				ofDisableDepthTest();
-				anchorWithFbo.fbo.draw(-0.25 / 2, -0.25, 0.25, 0.5);
+				if(anchorWithFbo.fbo) anchorWithFbo.fbo->draw(-0.25 / 2, -0.25, 0.25, 0.5);
 				ofEnableDepthTest();
 				ofPopMatrix();
 			}
@@ -135,8 +136,6 @@ void ofApp::draw() {
     ofDisableDepthTest();
     // ========== DEBUG STUFF ============= //
     //processor->debugInfo.drawDebugInformation(font);
-   
-    
 }
 
 //--------------------------------------------------------------
@@ -148,37 +147,46 @@ void ofApp::exit() {
 
 //--------------------------------------------------------------
 void ofApp::touchDown(ofTouchEventArgs &touch){
-	
-    
+    // Place ONE cutout per tap. This runs in the touch event (between frames), which is the
+    // only safe time to snapshot an FBO — doing it inside update()/draw() collides with the
+    // in-flight Metal camera command buffer and crashes.
+    placeAnchor();
+    lastPlaceTime = ofGetElapsedTimef();
+}
+
+void ofApp::placeAnchor(){
     if (session.currentFrame){
-		
-		if (anchorsWithFBOs.size() > 40) {
-			removeOldestAnchor();
-		}
-		
+
+        // Allocate-as-you-go, capped. The trail grows one FBO per placement up to MAX_TRAIL,
+        // then the oldest is evicted. (Pre-allocating all 100 at once spiked memory and crashed.)
+        if (anchorsWithFBOs.size() >= MAX_TRAIL) {
+            removeOldestAnchor();
+        }
+
         ARFrame *currentFrame = [session currentFrame];
 
         matrix_float4x4 translation = matrix_identity_float4x4;
-        translation.columns[3].z = -0.3; //WAS ORIGINALLY -.2
+        translation.columns[3].z = -0.3;
         matrix_float4x4 transform = matrix_multiply(currentFrame.camera.transform, translation);
 
-        // Add a new anchor to the session
         ARAnchor *anchor = [[ARAnchor alloc] initWithTransform:transform];
         [session addAnchor:anchor];
-		
-		ofFbo newFbo;
-		newFbo.allocate(ofGetWidth(), ofGetHeight(), GL_RGBA);
-		
-		newFbo.begin();
-		ofClear(0,0,0,0);
-		ofEnableAlphaBlending();
-		processor->drawCameraDebugPersonSegmentation();
-		ofDisableAlphaBlending();
-		newFbo.end();
-		
-		AnchorWithFBO anchorWithFbo = { anchor, newFbo };
-		anchorsWithFBOs.push_back(anchorWithFbo);
-		
+
+        // Full-res RGBA snapshot (matches the live camera feed). ~12 MB each, so the trail cap
+        // (MAX_TRAIL) is kept small to stay within the memory budget.
+        float fboScale = 1.0;
+        auto newFbo = std::make_shared<ofFbo>();
+        newFbo->allocate(ofGetWidth() * fboScale, ofGetHeight() * fboScale, GL_RGBA);
+
+        newFbo->begin();
+        ofClear(0,0,0,0);
+        ofEnableAlphaBlending();
+        processor->drawCameraDebugPersonSegmentation();
+        ofDisableAlphaBlending();
+        newFbo->end();
+
+        AnchorWithFBO anchorWithFbo = { anchor, newFbo };
+        anchorsWithFBOs.push_back(anchorWithFbo);
     }
 }
 
@@ -194,12 +202,18 @@ void ofApp::removeOldestAnchor(){
 
 //--------------------------------------------------------------
 void ofApp::touchMoved(ofTouchEventArgs &touch){
-    
+    // Hold + drag to place continuously, but THROTTLED. touchMoved fires dozens of times a
+    // second; placing on every one allocates FBOs faster than the GPU frees them and blows past
+    // 1 GB. Cap it to ~10 placements/sec — still a smooth continuous trail, bounded memory.
+    float now = ofGetElapsedTimef();
+    if(now - lastPlaceTime > 0.1f){
+        lastPlaceTime = now;
+        placeAnchor();
+    }
 }
 
 //--------------------------------------------------------------
 void ofApp::touchUp(ofTouchEventArgs &touch){
-    
 }
 
 //--------------------------------------------------------------
@@ -231,7 +245,6 @@ void ofApp::deviceOrientationChanged(int newOrientation){
 
 //--------------------------------------------------------------
 void ofApp::touchCancelled(ofTouchEventArgs& args){
-    
 }
 
 
