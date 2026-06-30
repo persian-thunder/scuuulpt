@@ -78,6 +78,26 @@ void ofApp::draw() {
 
     //ofDisableDepthTest();
 
+    // ---- Camera background ----
+    // Reuse the already-converted full-color (BGRA) camera texture that the segmentation path
+    // produces — wrap its GL id in an ofTexture and draw it fullscreen behind everything. No second
+    // camera pipeline is started, so there's no status=77 conflict like processor->draw() caused.
+    CVOpenGLESTextureRef camTex = processor->getCameraTexture();
+    if (camTex) {
+        GLuint texID = CVOpenGLESTextureGetName(camTex);
+        ofTexture bg;
+        bg.setUseExternalTextureID(texID);                               // don't let oF delete/realloc it
+        bg.texData.textureTarget    = CVOpenGLESTextureGetTarget(camTex); // GL_TEXTURE_2D
+        bg.texData.width  = bg.texData.tex_w = ofGetWidth();
+        bg.texData.height = bg.texData.tex_h = ofGetHeight();
+        bg.texData.tex_u  = bg.texData.tex_t = 1.0f;                      // normalized coords for TEXTURE_2D
+        bg.texData.glInternalFormat = GL_RGBA;
+        bg.texData.bFlipTexture = false;                                 // texture already in oF's orientation
+        bg.texData.bAllocated = true;
+        ofSetColor(255);
+        bg.draw(0, 0, ofGetWidth(), ofGetHeight());
+    }
+
     processor->drawCameraDebugPersonSegmentation();
     //ofEnableDepthTest();
 
