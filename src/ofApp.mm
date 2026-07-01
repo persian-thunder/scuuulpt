@@ -95,23 +95,19 @@ void ofApp::draw() {
             camera.begin();
             processor->setARCameraMatrices();
 
-            // Animated color WITHOUT a custom shader (those don't render here): each cloud keeps a
-            // base hue, tinted live via ofSetColor(fromHsb(baseHue + time)) through the default shader.
-            // ALPHA blend (not additive) so overlapping clouds composite by color instead of summing
-            // to white; depth test ON so nearer clouds occlude farther ones (readable 3D layering).
+            // Voxels wear the REAL camera color baked per vertex at capture. ALPHA blend + depth
+            // test so overlapping clouds composite by color and nearer ones occlude farther ones.
             ofEnableBlendMode(OF_BLENDMODE_ALPHA);
             ofEnableDepthTest();
-            float t = ofGetElapsedTimef();
             for (auto& ac : anchorsWithClouds) {
                 if (!ac.anchor || !ac.cloud) continue;
                 ofPushMatrix();
                 ofMatrix4x4 mat = convert<matrix_float4x4, ofMatrix4x4>(ac.anchor.transform);
                 ofMultMatrix(mat);
-                ofSetColor(0);                                            // black border cells
+                ofSetColor(0);                     // black border cells
                 if (ac.border) ac.border->draw();
-                float hue = fmodf(ac.baseHue + t * 0.15f, 1.0f);         // animated hue
-                ofSetColor(ofFloatColor::fromHsb(hue, 0.85f, 1.0f));
-                ac.cloud->draw();                                        // colored fill on top
+                ofSetColor(255);                   // white tint -> real per-voxel camera colors show
+                ac.cloud->draw();                  // colored fill on top
                 ofPopMatrix();
             }
             ofSetColor(255);
@@ -175,9 +171,29 @@ void ofApp::placeCloudAnchor(){
     std::vector<float> depth;                             // our own copy of the depth grid
     if (base) depth.assign(base, base + h * rowFloats);
     CVPixelBufferUnlockBaseAddress(depthMap, kCVPixelBufferLock_ReadOnly);
+
+    // Copy the camera image (biplanar YCbCr) too, so each voxel can wear the REAL color it captured.
+    CVPixelBufferRef camBuf = frame.capturedImage;
+    std::vector<uint8_t> yCopy, cCopy;
+    size_t camW = 0, camH = 0, yStride = 0, cStride = 0;
+    if (camBuf) {
+        CVPixelBufferLockBaseAddress(camBuf, kCVPixelBufferLock_ReadOnly);
+        camW    = CVPixelBufferGetWidthOfPlane(camBuf, 0);
+        camH    = CVPixelBufferGetHeightOfPlane(camBuf, 0);
+        yStride = CVPixelBufferGetBytesPerRowOfPlane(camBuf, 0);
+        cStride = CVPixelBufferGetBytesPerRowOfPlane(camBuf, 1);
+        uint8_t *yP = (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(camBuf, 0);
+        uint8_t *cP = (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(camBuf, 1);
+        if (yP && cP) {
+            yCopy.assign(yP, yP + camH * yStride);
+            cCopy.assign(cP, cP + (camH/2) * cStride);
+        }
+        CVPixelBufferUnlockBaseAddress(camBuf, kCVPixelBufferLock_ReadOnly);
+    }
     frame = nil;                                          // stop referencing ARKit's frame now
 
     if (depth.empty()) return;
+    bool haveColor = !yCopy.empty() && !cCopy.empty();
 
     // ---- Build the cloud from the LOCAL copy (no ARKit buffers held). Each point is a small
     // camera-facing QUAD (2 tris), drawn with oF's DEFAULT shader (the custom point shader / GL_POINTS
@@ -202,9 +218,21 @@ void ofApp::placeCloudAnchor(){
     if (cnt > 0) meanD /= cnt;
     const float DEPTH_PUNCH = 3.0f;  // 1 = flat; higher = more dramatic relief
 
-    // Per-cloud base hue, captured at placement. draw() animates it over time via ofSetColor,
-    // so no custom shader is needed (those don't render on this device). Geometry only here.
-    float placementHue = fmodf(ofGetElapsedTimef() * (1.0f/12.0f), 1.0f);
+    // Sample the REAL camera color for a depth-grid cell: scale coords to camera res, full-range
+    // YCbCr -> RGB. Falls back to white if no camera image this frame.
+    auto sampleCam = [&](int dx, int dy) -> ofFloatColor {
+        if (!haveColor) return ofFloatColor(1.0f, 1.0f, 1.0f);
+        int cx = ofClamp(dx * (int)camW / (int)w, 0, (int)camW - 1);
+        int cy = ofClamp(dy * (int)camH / (int)h, 0, (int)camH - 1);
+        float Y  = yCopy[cy * yStride + cx];
+        int   ci = (cy/2) * cStride + (cx/2) * 2;
+        float Cb = cCopy[ci]     - 128.0f;
+        float Cr = cCopy[ci + 1] - 128.0f;
+        return ofFloatColor(
+            ofClamp((Y + 1.402f*Cr)             / 255.0f, 0.0f, 1.0f),
+            ofClamp((Y - 0.344f*Cb - 0.714f*Cr) / 255.0f, 0.0f, 1.0f),
+            ofClamp((Y + 1.772f*Cb)             / 255.0f, 0.0f, 1.0f));
+    };
 
     for (size_t y = 0; y < h; y += step)
         for (size_t x = 0; x < w; x += step) {
@@ -220,17 +248,23 @@ void ofApp::placeCloudAnchor(){
             border->addVertex(b0); border->addVertex(b1); border->addVertex(b2);
             border->addVertex(b0); border->addVertex(b2); border->addVertex(b3);
 
-            // colored fill quad (smaller, nudged toward camera so it covers the border's center)
+            // colored fill quad (smaller, nudged toward camera so it covers the border's center),
+            // wearing the real camera color it captured.
+            ofFloatColor col = sampleCam((int)x, (int)y);
             float zf = c.z + zLift;
             glm::vec3 f0(c.x-sF,c.y-sF,zf), f1(c.x+sF,c.y-sF,zf), f2(c.x+sF,c.y+sF,zf), f3(c.x-sF,c.y+sF,zf);
-            cloud->addVertex(f0); cloud->addVertex(f1); cloud->addVertex(f2);
-            cloud->addVertex(f0); cloud->addVertex(f2); cloud->addVertex(f3);
+            cloud->addVertex(f0); cloud->addColor(col);
+            cloud->addVertex(f1); cloud->addColor(col);
+            cloud->addVertex(f2); cloud->addColor(col);
+            cloud->addVertex(f0); cloud->addColor(col);
+            cloud->addVertex(f2); cloud->addColor(col);
+            cloud->addVertex(f3); cloud->addColor(col);
         }
 
     // Anchor at the (copied) camera pose so camera-local points map straight into the world.
     ARAnchor *anchor = [[ARAnchor alloc] initWithTransform:camXform];
     [session addAnchor:anchor];
-    anchorsWithClouds.push_back({ anchor, cloud, border, placementHue });
+    anchorsWithClouds.push_back({ anchor, cloud, border, 0.0f }); // baseHue unused now (real color per voxel)
     ofLogNotice("cloud") << "placed cloud with " << cloud->getNumVertices() << " points";
 }
 
