@@ -206,8 +206,8 @@ void ofApp::placeCloudAnchor(){
     const float tanHalfFovY = 0.7f;  // rough pinhole; tune if scale looks off
     const float aspect = (float)w / (float)h;
     const float RANGE = 2.0f;
-    const float sB = 0.002f;         // border half-size (full cell)
-    const float sF = sB * 0.62f;     // fill half-size (smaller -> leaves black border)
+    const float sB = 0.0009f; // originally .002
+    const float sF = sB * 0.92f; // originally .62 (smaller, bigger border)
     const float zLift = 0.0008f;     // push fill toward camera so it sits over the black border
     float meanD = 0.0f; int cnt = 0;
     for (size_t y = 0; y < h; y += step)
