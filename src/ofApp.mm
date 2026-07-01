@@ -32,82 +32,31 @@ ofApp :: ~ofApp () {
 void ofApp::setup() {
 	ofClear(0,0,0,0);
 
-    img.load("OpenFrameworks.png");
-
     int fontSize = 8;
     if (ofxiOSGetOFWindow()->isRetinaSupportedOnDevice())
         fontSize *= 2;
-
     font.load("fonts/mono0755.ttf", fontSize);
 
     processor = ARProcessor::create(session);
     processor->setup();
-
-    // Minimal GLES2 point shader: oF's default shaders don't set gl_PointSize, so without this
-    // the cloud renders as 1px specks. position/color are bound automatically from the ofVboMesh.
-    string pointVert =
-        "uniform mat4 modelViewProjectionMatrix;\n"
-        "uniform float pointSize;\n"
-        "attribute vec4 position;\n"
-        "attribute vec4 color;\n"
-        "varying vec4 vColor;\n"
-        "void main(){ gl_Position = modelViewProjectionMatrix * position; gl_PointSize = pointSize; vColor = color; }\n";
-    string pointFrag =
-        "precision highp float;\n"
-        "varying vec4 vColor;\n"
-        "void main(){ gl_FragColor = vColor; }\n";
-    pointShader.setupShaderFromSource(GL_VERTEX_SHADER, pointVert);
-    pointShader.setupShaderFromSource(GL_FRAGMENT_SHADER, pointFrag);
-    pointShader.linkProgram();
-
-    // Cloud shader (triangles — this path renders on this ES2 device). Per vertex we pass the
-    // baked data in color: r = depth brightness, g = per-cloud base hue. texcoord = quad-local UV
-    // (-1..1) for a soft round glow. The fragment animates the hue over time and does the glow.
-    string cloudVert =
-        "uniform mat4 modelViewProjectionMatrix;\n"
-        "attribute vec4 position;\n"
-        "attribute vec4 color;\n"
-        "attribute vec2 texcoord;\n"
-        "varying vec4 vColor;\n"
-        "varying vec2 vUv;\n"
-        "void main(){ gl_Position = modelViewProjectionMatrix * position; vColor = color; vUv = texcoord; }\n";
-    string cloudFrag =
-        "precision highp float;\n"
-        "varying vec4 vColor;\n"
-        "varying vec2 vUv;\n"
-        "uniform float u_time;\n"
-        "vec3 hsb2rgb(vec3 c){\n"
-        "  vec3 rgb = clamp(abs(mod(c.x*6.0 + vec3(0.0,4.0,2.0),6.0)-3.0)-1.0, 0.0, 1.0);\n"
-        "  return c.z * mix(vec3(1.0), rgb, c.y);\n"
-        "}\n"
-        "void main(){\n"
-        "  float hue = fract(vColor.g + u_time*0.15);\n"          // baked per-cloud hue, rotating in time
-        "  float bright = 0.4 + 0.6*vColor.r;\n"                  // depth brightness
-        "  vec3 rgb = hsb2rgb(vec3(hue, 0.9, bright));\n"
-        "  gl_FragColor = vec4(rgb, 1.0);\n"                      // DIAGNOSTIC: solid, no glow/discard
-        "}\n";
-    cloudShader.setupShaderFromSource(GL_VERTEX_SHADER, cloudVert);
-    cloudShader.setupShaderFromSource(GL_FRAGMENT_SHADER, cloudFrag);
-    cloudShader.linkProgram();
 }
 
 
 
 //--------------------------------------------------------------
 void ofApp::update(){
-	//allocate FBO
-	if (!fboAllocated) {
-		bodyFbo.allocate(ofGetWidth(), ofGetHeight());
-		fboAllocated = true;
-	}
-
-
     processor->update();
 
-
-    // NOTE: depth is now read only at CAPTURE time (placeCloudAnchor), not per frame. The old
-    // per-frame depth preview re-uploaded a texture every frame, churning the GPU and pressuring
-    // the fragile Metal camera texture cache (the MetalCam:203 crash). Removed for stability.
+    // Press & hold to paint: while a finger is down, place on a throttle (moving or not). iOS gives
+    // no repeating "held" touch event, so we drive it from update(). Depth is only read here at these
+    // throttled placements, not every frame, so it doesn't churn the Metal camera cache.
+    if (isTouching) {
+        float now = ofGetElapsedTimef();
+        if (now - lastPlaceTime > PLACE_INTERVAL) {
+            lastPlaceTime = now;
+            placeCloudAnchor();
+        }
+    }
 }
 
 //--------------------------------------------------------------
@@ -145,45 +94,6 @@ void ofApp::draw() {
         if (session.currentFrame.camera){
             camera.begin();
             processor->setARCameraMatrices();
-
-			//here we iterate through all of our anchors that we placed in touchDown
-			for (auto& anchorWithFbo: anchorsWithFBOs) {
-				if(!anchorWithFbo.anchor || !anchorWithFbo.fbo) continue; // empty ring slot
-				ofPushMatrix();
-				ofMatrix4x4 mat = convert<matrix_float4x4, ofMatrix4x4>(anchorWithFbo.anchor.transform);
-				ofMultMatrix(mat);
-				ofRotate(-90,0,0,1); //added
-				ofSetColor(255); //added
-				ofScale(-1,1,1);
-
-				ofDisableDepthTest();
-				if(anchorWithFbo.fbo) anchorWithFbo.fbo->draw(-0.25 / 2, -0.25, 0.25, 0.5);
-				ofEnableDepthTest();
-				ofPopMatrix();
-			}
-
-			/*
-            for (int i = 0; i < session.currentFrame.anchors.count; i++){
-                ARAnchor * anchor = session.currentFrame.anchors[i];
-
-                // note - if you need to differentiate between different types of anchors, there is a
-                // "isKindOfClass" method in objective-c that could be used. For example, if you wanted to
-                // check for a Plane anchor, you could put this in an if statement.
-                // if([anchor isKindOfClass:[ARPlaneAnchor class]]) { // do something if we find a plane anchor}
-                // Not important for this example but something good to remember.
-
-                ofPushMatrix();
-                ofMatrix4x4 mat = convert<matrix_float4x4, ofMatrix4x4>(anchor.transform);
-                ofMultMatrix(mat);
-
-                ofSetColor(255);
-                ofRotate(90,0,0,1);
-
-                img.draw(-0.25 / 2, -0.25 / 2,0.25,0.25);
-
-
-                ofPopMatrix();
-            }*/
 
             // Animated color WITHOUT a custom shader (those don't render here): each cloud keeps a
             // base hue, tinted live via ofSetColor(fromHsb(baseHue + time)) through the default shader.
@@ -227,65 +137,10 @@ void ofApp::exit() {
 
 //--------------------------------------------------------------
 void ofApp::touchDown(ofTouchEventArgs &touch){
-    // Build ONE depth point cloud per tap, in the touch event (between frames) — the safe time to
-    // read GPU/AR resources. The cloud is uploaded once and then drawn as static geometry.
+    // Place one immediately, then update() keeps placing while the finger stays down (press & hold).
+    isTouching = true;
     placeCloudAnchor();
     lastPlaceTime = ofGetElapsedTimef();
-}
-
-void ofApp::placeAnchor(){
-    if (session.currentFrame){
-
-        // Half-res RGBA8 snapshot (~3 MB each). RGBA4444 was tried but this build runs the GLES2
-        // renderer, where GL_RGBA4 is not a valid texture internalformat — so we stay at GL_RGBA.
-        // (oF FBOs already allocate with no depth/stencil/MSAA by default, so the color texture
-        // below is the entire per-snapshot cost.)
-        float fboScale = .35;   // lowered from .5: ~2x less memory/snapshot, trail draws small anyway
-        int fboW = ofGetWidth()  * fboScale;
-        int fboH = ofGetHeight() * fboScale;
-
-        // Budget-driven cap: derive the max trail length from the real per-FBO cost and the memory
-        // budget, then evict oldest until the NEW snapshot will fit. This bounds total trail memory
-        // to ~TRAIL_BUDGET_MB no matter the resolution or draw speed, so it can't OOM the app.
-        float fboMB    = (fboW * (float)fboH * 4.0f) / (1024.0f * 1024.0f); // RGBA8 = 4 bytes/px
-        int   budgetN  = std::max(1, (int)(TRAIL_BUDGET_MB / fboMB));
-        int   maxTrail = std::min(budgetN, MAX_TRAIL_COUNT);               // hard count wins
-        while (anchorsWithFBOs.size() >= (size_t)maxTrail) {
-            removeOldestAnchor();
-        }
-
-        ARFrame *currentFrame = [session currentFrame];
-
-        matrix_float4x4 translation = matrix_identity_float4x4;
-        translation.columns[3].z = -0.3;
-        matrix_float4x4 transform = matrix_multiply(currentFrame.camera.transform, translation);
-
-        ARAnchor *anchor = [[ARAnchor alloc] initWithTransform:transform];
-        [session addAnchor:anchor];
-
-        auto newFbo = std::make_shared<ofFbo>();
-        newFbo->allocate(fboW, fboH, GL_RGBA);
-
-        newFbo->begin();
-        ofClear(0,0,0,0);
-        ofEnableAlphaBlending();
-        processor->drawCameraDebugPersonSegmentation();
-        ofDisableAlphaBlending();
-        newFbo->end();
-
-        AnchorWithFBO anchorWithFbo = { anchor, newFbo };
-        anchorsWithFBOs.push_back(anchorWithFbo);
-    }
-}
-
-void ofApp::removeOldestAnchor(){
-	if (!anchorsWithFBOs.empty()){
-		ARAnchor* anchor = anchorsWithFBOs.front().anchor;
-		[session removeAnchor:anchor];
-
-		// Delete anchor and FBO from vector
-		anchorsWithFBOs.erase(anchorsWithFBOs.begin());
-	}
 }
 
 void ofApp::removeOldestCloud(){
@@ -384,26 +239,18 @@ void ofApp::gotMemoryWarning(){
 	// iOS is about to start killing apps. Drop the whole trail NOW (frees every snapshot's GPU
 	// texture via shared_ptr) so we survive instead of getting jetsam'd. The budget cap should
 	// normally keep us clear of this; this is the last-resort backstop for baseline growth.
-	ofLogWarning("ofApp") << "memory warning -> dumping " << anchorsWithFBOs.size()
-	                      << " FBOs + " << anchorsWithClouds.size() << " clouds";
-	while (!anchorsWithFBOs.empty())   removeOldestAnchor();
+	ofLogWarning("ofApp") << "memory warning -> dumping " << anchorsWithClouds.size() << " clouds";
 	while (!anchorsWithClouds.empty()) removeOldestCloud();
 }
 
 //--------------------------------------------------------------
 void ofApp::touchMoved(ofTouchEventArgs &touch){
-    // Hold + drag to place continuously, but THROTTLED. touchMoved fires dozens of times a
-    // second; placing on every one allocates FBOs faster than the GPU frees them and blows past
-    // 1 GB. Cap it to ~10 placements/sec — still a smooth continuous trail, bounded memory.
-    float now = ofGetElapsedTimef();
-    if(now - lastPlaceTime > 0.1f){   // ~10 clouds/sec on drag
-        lastPlaceTime = now;
-        placeCloudAnchor();
-    }
+    // Nothing needed — update() handles continuous placement while held (moving or stationary).
 }
 
 //--------------------------------------------------------------
 void ofApp::touchUp(ofTouchEventArgs &touch){
+    isTouching = false; // stop placing
 }
 
 //--------------------------------------------------------------
@@ -431,6 +278,7 @@ void ofApp::deviceOrientationChanged(int newOrientation){
 
 //--------------------------------------------------------------
 void ofApp::touchCancelled(ofTouchEventArgs& args){
+    isTouching = false; // treat a cancelled touch like a lift
 }
 
 
