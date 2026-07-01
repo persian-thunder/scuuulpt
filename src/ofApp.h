@@ -10,6 +10,14 @@ struct AnchorWithFBO {
 	std::shared_ptr<ofFbo> fbo; // shared_ptr so the FBO is allocated once and never copied
 };
 
+// A point cloud snapshot, built ONCE on tap from the depth frame, then drawn as static geometry.
+struct AnchorWithCloud {
+	ARAnchor *anchor;
+	std::shared_ptr<ofVboMesh> cloud;  // colored FILL quads (smaller, drawn on top)
+	std::shared_ptr<ofVboMesh> border; // BLACK quads (full size, behind) -> black border per cell
+	float baseHue;                     // 0..1 hue captured at placement; animated over time in draw()
+};
+
 class ofApp : public ofxiOSApp {
 
 public:
@@ -36,6 +44,8 @@ public:
 
 	void removeOldestAnchor();
 	void placeAnchor();        // captures the current cutout into an AR-anchored FBO
+	void placeCloudAnchor();   // builds a depth point cloud ONCE and anchors it as static geometry
+	void removeOldestCloud();
 	float lastPlaceTime = 0;   // throttle drag-placement so we don't allocate FBOs too fast
 
 	// Trail caps. placeAnchor() evicts oldest until BOTH are satisfied, so the trail can't OOM.
@@ -60,8 +70,13 @@ public:
     ofShader meshShader;
 
 	std::vector<AnchorWithFBO> anchorsWithFBOs;
+	std::vector<AnchorWithCloud> anchorsWithClouds;
 	bool fboAllocated = false;
 	ofFbo bodyFbo;
+	ofFloatImage depthPreview;  // Step B: reused grayscale view of ARKit person depth
+	ofVboMesh livePointCloud;   // Stage 2: live 3D point cloud unprojected from depth
+	ofShader  pointShader;      // (unused) old gl_PointSize experiment
+	ofShader  cloudShader;      // live: soft additive glow + animated hue for the point clouds
 };
 
 
