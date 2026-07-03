@@ -4,10 +4,12 @@
 #include <ARKit/ARKit.h>
 #include "ofxARKit.h"
 
-//Anchor STRUCT
-struct AnchorWithFBO {
-	ARAnchor *anchor; // Objective-C pointer
-	std::shared_ptr<ofFbo> fbo; // shared_ptr so the FBO is allocated once and never copied
+// A point cloud snapshot, built ONCE on tap from the depth frame, then drawn as static geometry.
+struct AnchorWithCloud {
+	ARAnchor *anchor;
+	std::shared_ptr<ofVboMesh> cloud;  // colored FILL quads (smaller, drawn on top)
+	std::shared_ptr<ofVboMesh> border; // BLACK quads (full size, behind) -> black border per cell
+	float baseHue;                     // 0..1 hue captured at placement; animated over time in draw()
 };
 
 class ofApp : public ofxiOSApp {
@@ -34,34 +36,22 @@ public:
     void gotMemoryWarning();
     void deviceOrientationChanged(int newOrientation);
 
-	void removeOldestAnchor();
-	void placeAnchor();        // captures the current cutout into an AR-anchored FBO
-	float lastPlaceTime = 0;   // throttle drag-placement so we don't allocate FBOs too fast
+	void placeCloudAnchor();   // builds a depth point-cloud snapshot ONCE and anchors it in the world
+	void removeOldestCloud();
+	bool  isTouching = false;  // true while a finger is down -> update() keeps placing (press & hold)
+	float lastPlaceTime = 0;   // throttles continuous placement
+	static constexpr float PLACE_INTERVAL = 0.1f; // seconds between placements while held (~10/sec)
 
-	// Trail caps. placeAnchor() evicts oldest until BOTH are satisfied, so the trail can't OOM.
-	//  - MAX_TRAIL_COUNT is the hard safety: a known-safe anchor count. The byte budget below
-	//    under-estimates real GPU cost (driver rounding, ofTexture overhead, ARKit per-anchor
-	//    state), so this count is the ceiling that actually keeps us alive. Raise cautiously.
-	//  - TRAIL_BUDGET_MB is the secondary guard for when you bump resolution back up.
-	static constexpr int   MAX_TRAIL_COUNT = 60;
-	static constexpr float TRAIL_BUDGET_MB = 120.0f;
+	// Hard cap on stored cloud snapshots — evict the oldest beyond this to keep memory bounded.
+	static constexpr int MAX_TRAIL_COUNT = 60;
 
-    vector < matrix_float4x4 > mats;
-    vector<ARAnchor*> anchors;
     ofCamera camera;
     ofTrueTypeFont font;
-    ofImage img;
 
     // ====== AR STUFF ======== //
     ARSession * session;
     UIDevice * device;
     ARRef processor;
 
-    ofShader meshShader;
-
-	std::vector<AnchorWithFBO> anchorsWithFBOs;
-	bool fboAllocated = false;
-	ofFbo bodyFbo;
+	std::vector<AnchorWithCloud> anchorsWithClouds;
 };
-
-

@@ -1,4 +1,5 @@
 #include "ofApp.h"
+#include <cstddef>
 
 using namespace ofxARKit::common;
 using namespace ofxARKit::core;
@@ -10,11 +11,11 @@ ofApp :: ofApp (ARSession * session){
 
 }
 
-
+//--------------------------------------------------------------
 ofApp::ofApp(){
     cout << "creating ofApp with new session" << endl;
 
-    // Initialize AR session directly
+    // init AR session
     SessionFormat format;
     format.enableLighting();
     this->session = generateNewSession(format);
@@ -29,46 +30,36 @@ ofApp :: ~ofApp () {
 void ofApp::setup() {
 	ofClear(0,0,0,0);
 
-    img.load("OpenFrameworks.png");
-
     int fontSize = 8;
     if (ofxiOSGetOFWindow()->isRetinaSupportedOnDevice())
         fontSize *= 2;
-
     font.load("fonts/mono0755.ttf", fontSize);
 
+	//ARProcessor API
     processor = ARProcessor::create(session);
     processor->setup();
 
-
+    // Launch orientation fix: the AR camera's `orientation` is uninitialized until a device-rotation
+    // event fires — that's why anchors render sideways at launch until you tilt the phone. Seed it now
+    // so the view/projection matrices are correct from the first frame.
+    processor->deviceOrientationChanged(UIInterfaceOrientationPortrait);
 }
 
 
 
 //--------------------------------------------------------------
 void ofApp::update(){
-	//allocate FBO
-	if (!fboAllocated) {
-		bodyFbo.allocate(ofGetWidth(), ofGetHeight());
-		fboAllocated = true;
-	}
-
-
     processor->update();
 
-
-#if defined(__IPHONE_13_0)
-
-    // check Camera.h for shader using those :
-//     CVOpenGLESTextureRef _tex = processor->getCameraTexture();`
-//     CVOpenGLESTextureRef matteAlpha = processor->getTextureMatteAlpha();
-//     CVOpenGLESTextureRef matteDepth = processor->getTextureMatteDepth();
-//     CVOpenGLESTextureRef depth = processor->getTextureDepth();
-//     ofMatrix3x3 affineCoeff = processor->getAffineTransform();
-
-#endif
-
-
+	// press & hold to draw anchor
+	// internval is # of anchors place at a time
+    if (isTouching) {
+        float now = ofGetElapsedTimef();
+        if (now - lastPlaceTime > PLACE_INTERVAL) {
+            lastPlaceTime = now;
+            placeCloudAnchor();
+        }
+    }
 }
 
 //--------------------------------------------------------------
@@ -76,162 +67,224 @@ void ofApp::draw() {
 	ofClear(0,0,0, 0);
     ofEnableAlphaBlending();
 
-    //ofDisableDepthTest();
+    // reuse (BGRA) camera texture (defualt)
+    CVOpenGLESTextureRef camTex = processor->getCameraTexture();
+    if (camTex) {
+        GLuint texID = CVOpenGLESTextureGetName(camTex);
+        ofTexture bg;
+        bg.setUseExternalTextureID(texID);                                // don't let oF delete/realloc it
+        bg.texData.textureTarget    = CVOpenGLESTextureGetTarget(camTex); // GL_TEXTURE_2D
+        bg.texData.width  = bg.texData.tex_w = ofGetWidth();
+        bg.texData.height = bg.texData.tex_h = ofGetHeight();
+        bg.texData.tex_u  = bg.texData.tex_t = 1.0f;                      // normalized coords for TEXTURE_2D
+        bg.texData.glInternalFormat = GL_RGBA;
+        bg.texData.bFlipTexture = false;                                  // texture already in oF's orientation
+        bg.texData.bAllocated = true;
+        ofSetColor(255);
+        bg.draw(0, 0, ofGetWidth(), ofGetHeight());
+    }
 
-    processor->drawCameraDebugPersonSegmentation();
-    //ofEnableDepthTest();
+	// disable person segmentation
+    // processor->drawCameraDebugPersonSegmentation();
 
     if (session.currentFrame){
         if (session.currentFrame.camera){
             camera.begin();
             processor->setARCameraMatrices();
 
-			//here we iterate through all of our anchors that we placed in touchDown
-			for (auto& anchorWithFbo: anchorsWithFBOs) {
-				if(!anchorWithFbo.anchor || !anchorWithFbo.fbo) continue; // empty ring slot
-				ofPushMatrix();
-				ofMatrix4x4 mat = convert<matrix_float4x4, ofMatrix4x4>(anchorWithFbo.anchor.transform);
-				ofMultMatrix(mat);
-				ofRotate(-90,0,0,1); //added
-				ofSetColor(255); //added
-				ofScale(-1,1,1);
-
-				ofDisableDepthTest();
-				if(anchorWithFbo.fbo) anchorWithFbo.fbo->draw(-0.25 / 2, -0.25, 0.25, 0.5);
-				ofEnableDepthTest();
-				ofPopMatrix();
-			}
-
-			/*
-            for (int i = 0; i < session.currentFrame.anchors.count; i++){
-                ARAnchor * anchor = session.currentFrame.anchors[i];
-
-                // note - if you need to differentiate between different types of anchors, there is a
-                // "isKindOfClass" method in objective-c that could be used. For example, if you wanted to
-                // check for a Plane anchor, you could put this in an if statement.
-                // if([anchor isKindOfClass:[ARPlaneAnchor class]]) { // do something if we find a plane anchor}
-                // Not important for this example but something good to remember.
-
+            // voxels texture real camera color, alpha blend + depth
+            ofEnableBlendMode(OF_BLENDMODE_ALPHA);
+            ofEnableDepthTest();
+            for (auto& ac : anchorsWithClouds) {
+                if (!ac.anchor || !ac.cloud) continue;
                 ofPushMatrix();
-                ofMatrix4x4 mat = convert<matrix_float4x4, ofMatrix4x4>(anchor.transform);
+                ofMatrix4x4 mat = convert<matrix_float4x4, ofMatrix4x4>(ac.anchor.transform);
                 ofMultMatrix(mat);
-
-                ofSetColor(255);
-                ofRotate(90,0,0,1);
-
-                img.draw(-0.25 / 2, -0.25 / 2,0.25,0.25);
-
-
+                ofSetColor(0);                     // black border, cellular
+                if (ac.border) ac.border->draw();
+                ofSetColor(255);                   // white tint -> real per-voxel camera colors show
+                ac.cloud->draw();                  // colored fill on top
                 ofPopMatrix();
-            }*/
+            }
+            ofSetColor(255);
 
             camera.end();
         }
-
     }
 	ofDisableAlphaBlending();
 	ofEnableDepthTest();
     ofDisableDepthTest();
-    // ========== DEBUG STUFF ============= //
-    //processor->debugInfo.drawDebugInformation(font);
+
 }
 
 //--------------------------------------------------------------
 void ofApp::exit() {
-    //
 }
-
-
 
 //--------------------------------------------------------------
 void ofApp::touchDown(ofTouchEventArgs &touch){
-    // Place ONE cutout per tap. This runs in the touch event (between frames), which is the
-    // only safe time to snapshot an FBO — doing it inside update()/draw() collides with the
-    // in-flight Metal camera command buffer and crashes.
-    placeAnchor();
+    // place then update(), press & hold
+    isTouching = true;
+    placeCloudAnchor();
     lastPlaceTime = ofGetElapsedTimef();
 }
 
-void ofApp::placeAnchor(){
-    if (session.currentFrame){
-
-        // Half-res RGBA8 snapshot (~3 MB each). RGBA4444 was tried but this build runs the GLES2
-        // renderer, where GL_RGBA4 is not a valid texture internalformat — so we stay at GL_RGBA.
-        // (oF FBOs already allocate with no depth/stencil/MSAA by default, so the color texture
-        // below is the entire per-snapshot cost.)
-        float fboScale = .35;   // lowered from .5: ~2x less memory/snapshot, trail draws small anyway
-        int fboW = ofGetWidth()  * fboScale;
-        int fboH = ofGetHeight() * fboScale;
-
-        // Budget-driven cap: derive the max trail length from the real per-FBO cost and the memory
-        // budget, then evict oldest until the NEW snapshot will fit. This bounds total trail memory
-        // to ~TRAIL_BUDGET_MB no matter the resolution or draw speed, so it can't OOM the app.
-        float fboMB    = (fboW * (float)fboH * 4.0f) / (1024.0f * 1024.0f); // RGBA8 = 4 bytes/px
-        int   budgetN  = std::max(1, (int)(TRAIL_BUDGET_MB / fboMB));
-        int   maxTrail = std::min(budgetN, MAX_TRAIL_COUNT);               // hard count wins
-        while (anchorsWithFBOs.size() >= (size_t)maxTrail) {
-            removeOldestAnchor();
-        }
-
-        ARFrame *currentFrame = [session currentFrame];
-
-        matrix_float4x4 translation = matrix_identity_float4x4;
-        translation.columns[3].z = -0.3;
-        matrix_float4x4 transform = matrix_multiply(currentFrame.camera.transform, translation);
-
-        ARAnchor *anchor = [[ARAnchor alloc] initWithTransform:transform];
-        [session addAnchor:anchor];
-
-        auto newFbo = std::make_shared<ofFbo>();
-        newFbo->allocate(fboW, fboH, GL_RGBA);
-
-        newFbo->begin();
-        ofClear(0,0,0,0);
-        ofEnableAlphaBlending();
-        processor->drawCameraDebugPersonSegmentation();
-        ofDisableAlphaBlending();
-        newFbo->end();
-
-        AnchorWithFBO anchorWithFbo = { anchor, newFbo };
-        anchorsWithFBOs.push_back(anchorWithFbo);
-    }
+void ofApp::removeOldestCloud(){
+	if (!anchorsWithClouds.empty()){
+		[session removeAnchor:anchorsWithClouds.front().anchor];
+		anchorsWithClouds.erase(anchorsWithClouds.begin()); // shared_ptr frees the VBO
+	}
 }
 
-void ofApp::removeOldestAnchor(){
-	if (!anchorsWithFBOs.empty()){
-		ARAnchor* anchor = anchorsWithFBOs.front().anchor;
-		[session removeAnchor:anchor];
+//--------------------------------------------------------------
+void ofApp::placeCloudAnchor(){
+    if (!session.currentFrame || !session.currentFrame.estimatedDepthData) return;
 
-		// Delete anchor and FBO from vector
-		anchorsWithFBOs.erase(anchorsWithFBOs.begin());
-	}
+    while (anchorsWithClouds.size() >= (size_t)MAX_TRAIL_COUNT) removeOldestCloud();
+
+    // grab ARframe objects
+    ARFrame *frame = session.currentFrame;
+    matrix_float4x4 camXform = frame.camera.transform;   // value copy of the pose
+    CVPixelBufferRef depthMap = frame.estimatedDepthData; //depth image
+
+	
+    CVPixelBufferLockBaseAddress(depthMap, kCVPixelBufferLock_ReadOnly); //have to lock or else corrupt data
+    size_t w = CVPixelBufferGetWidth(depthMap);
+    size_t h = CVPixelBufferGetHeight(depthMap);
+    size_t rowFloats = CVPixelBufferGetBytesPerRow(depthMap) / sizeof(float);
+    float *base = (float *)CVPixelBufferGetBaseAddress(depthMap);
+
+    std::vector<float> depth;                             // our own copy of the depth grid
+    if (base) depth.assign(base, base + h * rowFloats);
+    CVPixelBufferUnlockBaseAddress(depthMap, kCVPixelBufferLock_ReadOnly);
+
+    // Copy the camera image (biplanar YCbCr) too, so each voxel can wear the REAL color it captured.
+    CVPixelBufferRef camBuf = frame.capturedImage;
+    std::vector<uint8_t> yCopy, cCopy;
+    size_t camW = 0, camH = 0, yStride = 0, cStride = 0;
+    if (camBuf) {
+        CVPixelBufferLockBaseAddress(camBuf, kCVPixelBufferLock_ReadOnly);
+        camW    = CVPixelBufferGetWidthOfPlane(camBuf, 0);
+        camH    = CVPixelBufferGetHeightOfPlane(camBuf, 0);
+        yStride = CVPixelBufferGetBytesPerRowOfPlane(camBuf, 0);
+        cStride = CVPixelBufferGetBytesPerRowOfPlane(camBuf, 1);
+        uint8_t *yP = (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(camBuf, 0);
+        uint8_t *cP = (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(camBuf, 1);
+        if (yP && cP) {
+            yCopy.assign(yP, yP + camH * yStride);
+            cCopy.assign(cP, cP + (camH/2) * cStride);
+        }
+        CVPixelBufferUnlockBaseAddress(camBuf, kCVPixelBufferLock_ReadOnly);
+    }
+    frame = nil;                                          // stop referencing ARKit's frame now
+
+    if (depth.empty()) return;
+    bool haveColor = !yCopy.empty() && !cCopy.empty();
+
+    // ---- Build the cloud from the LOCAL copy (no ARKit buffers held). Each point is a small
+    // camera-facing QUAD (2 tris), drawn with oF's DEFAULT shader (the custom point shader / GL_POINTS
+    // renders nothing on this ES2 device). s = half-quad size in meters.
+    auto cloud  = std::make_shared<ofVboMesh>();  // colored fill
+    auto border = std::make_shared<ofVboMesh>();  // black border
+    cloud->setMode(OF_PRIMITIVE_TRIANGLES);
+    border->setMode(OF_PRIMITIVE_TRIANGLES);
+    const int   step = 1;            // ~256x192 -> ~5k points (used for the mean-depth pass)
+    const float UP   = 1.41f;        // depth upsample factor per axis: 1.41 (sqrt2) ~= 2x total points; 2.0 = 4x
+    const float tanHalfFovY = 0.7f;  // rough pinhole; tune if scale looks off
+    const float aspect = (float)w / (float)h;
+    const float RANGE = 2.0f;
+    const float sB = 0.005f; // originally .002
+    const float sF = sB * 0.95f; // originally .62 (smaller, bigger border)
+    const float zLift = 0.0008f;     // push fill toward camera so it sits over the black border
+    float meanD = 0.0f; int cnt = 0;
+    for (size_t y = 0; y < h; y += step)
+        for (size_t x = 0; x < w; x += step) {
+            float dd = depth[y*rowFloats + x];
+            if (dd > 0.0f) { meanD += dd; cnt++; }
+        }
+    if (cnt > 0) meanD /= cnt;
+    const float DEPTH_PUNCH = 3.0f;  // 1 = flat; higher = more dramatic relief
+
+    // Bilinear depth at a fractional grid position; returns 0 (skip) if ANY neighbor is background,
+    // so interpolated voxels never bridge the person's silhouette edge into empty space.
+    auto sampleDepth = [&](float fx, float fy) -> float {
+        int x0 = (int)fx, y0 = (int)fy;
+        int x1 = std::min(x0 + 1, (int)w - 1), y1 = std::min(y0 + 1, (int)h - 1);
+        float tx = fx - x0, ty = fy - y0;
+        float d00 = depth[y0*rowFloats + x0], d10 = depth[y0*rowFloats + x1];
+        float d01 = depth[y1*rowFloats + x0], d11 = depth[y1*rowFloats + x1];
+        if (d00 <= 0 || d10 <= 0 || d01 <= 0 || d11 <= 0) return 0.0f;
+        float a = d00*(1-tx) + d10*tx, b = d01*(1-tx) + d11*tx;
+        return a*(1-ty) + b*ty;
+    };
+	
+    // cam color by normalized UV -> samples  full-res camera
+    auto sampleCamUV = [&](float u, float v) -> ofFloatColor {
+        if (!haveColor) return ofFloatColor(1.0f, 1.0f, 1.0f);
+        int cx = ofClamp((int)(u * camW), 0, (int)camW - 1);
+        int cy = ofClamp((int)(v * camH), 0, (int)camH - 1);
+        float Y  = yCopy[cy * yStride + cx];
+        int   ci = (cy/2) * cStride + (cx/2) * 2;
+        float Cb = cCopy[ci] - 128.0f, Cr = cCopy[ci + 1] - 128.0f;
+		
+		// standard YCbCr to RGB conversion, not random numbers bih
+        return ofFloatColor(
+            ofClamp((Y + 1.402f*Cr)             / 255.0f, 0.0f, 1.0f),
+            ofClamp((Y - 0.344f*Cb - 0.714f*Cr) / 255.0f, 0.0f, 1.0f),
+            ofClamp((Y + 1.772f*Cb)             / 255.0f, 0.0f, 1.0f));
+    };
+
+    // Finer grid: UP x the depth resolution. Depth is interpolated; color is sampled full-res.
+    const int   gw = (int)((int)w * UP), gh = (int)((int)h * UP);
+    const float cellB = sB / (float)UP;              // shrink cells to match the denser spacing
+    const float cellF = cellB * (sF / sB);           // keep the same fill/border ratio
+    for (int gy = 0; gy < gh; gy++)
+        for (int gx = 0; gx < gw; gx++) {
+            float fx = (float)gx / UP, fy = (float)gy / UP;
+            float d = sampleDepth(fx, fy);
+            if (d <= 0.0f) continue;
+            float ndcx = (gx/(float)gw)*2.0f - 1.0f;
+            float ndcy = 1.0f - (gy/(float)gh)*2.0f;
+            float zPunched = meanD + (d - meanD) * DEPTH_PUNCH;
+            glm::vec3 c(ndcx*tanHalfFovY*aspect*d, ndcy*tanHalfFovY*d, -zPunched);
+
+            // black border quad (full cell, at c.z)
+            glm::vec3 b0(c.x-cellB,c.y-cellB,c.z), b1(c.x+cellB,c.y-cellB,c.z), b2(c.x+cellB,c.y+cellB,c.z), b3(c.x-cellB,c.y+cellB,c.z);
+            border->addVertex(b0); border->addVertex(b1); border->addVertex(b2);
+            border->addVertex(b0); border->addVertex(b2); border->addVertex(b3);
+
+            // colored fill quad, full-res camera color at this finer position
+            ofFloatColor col = sampleCamUV(gx/(float)gw, gy/(float)gh);
+            float zf = c.z + zLift;
+            glm::vec3 f0(c.x-cellF,c.y-cellF,zf), f1(c.x+cellF,c.y-cellF,zf), f2(c.x+cellF,c.y+cellF,zf), f3(c.x-cellF,c.y+cellF,zf);
+            cloud->addVertex(f0); cloud->addColor(col);
+            cloud->addVertex(f1); cloud->addColor(col);
+            cloud->addVertex(f2); cloud->addColor(col);
+            cloud->addVertex(f0); cloud->addColor(col);
+            cloud->addVertex(f2); cloud->addColor(col);
+            cloud->addVertex(f3); cloud->addColor(col);
+        }
+
+    // Anchor at the (copied) camera pose so camera-local points map straight into the world.
+    ARAnchor *anchor = [[ARAnchor alloc] initWithTransform:camXform];
+    [session addAnchor:anchor];
+    anchorsWithClouds.push_back({ anchor, cloud, border, 0.0f }); // baseHue unused now (real color per voxel)
+    ofLogNotice("cloud") << "placed cloud with " << cloud->getNumVertices() << " points";
 }
 
 //--------------------------------------------------------------
 void ofApp::gotMemoryWarning(){
-	// iOS is about to start killing apps. Drop the whole trail NOW (frees every snapshot's GPU
-	// texture via shared_ptr) so we survive instead of getting jetsam'd. The budget cap should
-	// normally keep us clear of this; this is the last-resort backstop for baseline growth.
-	ofLogWarning("ofApp") << "memory warning -> dumping " << anchorsWithFBOs.size() << " trail FBOs";
-	while (!anchorsWithFBOs.empty()) {
-		removeOldestAnchor();
-	}
+	ofLogWarning("ofApp") << "memory warning -> dumping " << anchorsWithClouds.size() << " clouds";
+	while (!anchorsWithClouds.empty()) removeOldestCloud();
 }
 
 //--------------------------------------------------------------
 void ofApp::touchMoved(ofTouchEventArgs &touch){
-    // Hold + drag to place continuously, but THROTTLED. touchMoved fires dozens of times a
-    // second; placing on every one allocates FBOs faster than the GPU frees them and blows past
-    // 1 GB. Cap it to ~10 placements/sec — still a smooth continuous trail, bounded memory.
-    float now = ofGetElapsedTimef();
-    if(now - lastPlaceTime > 0.025f){
-        lastPlaceTime = now;
-        placeAnchor();
-    }
 }
 
 //--------------------------------------------------------------
 void ofApp::touchUp(ofTouchEventArgs &touch){
+    isTouching = false; // stop placing
 }
 
 //--------------------------------------------------------------
@@ -246,19 +299,18 @@ void ofApp::lostFocus(){
 
 //--------------------------------------------------------------
 void ofApp::gotFocus(){
-
 }
 
 
 //--------------------------------------------------------------
 void ofApp::deviceOrientationChanged(int newOrientation){
-
     processor->deviceOrientationChanged(newOrientation);
 }
 
 
 //--------------------------------------------------------------
 void ofApp::touchCancelled(ofTouchEventArgs& args){
+    isTouching = false; // treat a cancelled touch like a lift
 }
 
 
