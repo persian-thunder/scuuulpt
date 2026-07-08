@@ -39,9 +39,7 @@ void ofApp::setup() {
     processor = ARProcessor::create(session);
     processor->setup();
 
-    // Launch orientation fix: the AR camera's `orientation` is uninitialized until a device-rotation
-    // event fires — that's why anchors render sideways at launch until you tilt the phone. Seed it now
-    // so the view/projection matrices are correct from the first frame.
+    // portrait orientation overload
     processor->deviceOrientationChanged(UIInterfaceOrientationPortrait);
 }
 
@@ -51,8 +49,7 @@ void ofApp::setup() {
 void ofApp::update(){
     processor->update();
 
-	// press & hold to draw anchor
-	// internval is # of anchors place at a time
+	// press & hold to draw anchor, intervals
     if (isTouching) {
         float now = ofGetElapsedTimef();
         if (now - lastPlaceTime > PLACE_INTERVAL) {
@@ -72,7 +69,9 @@ void ofApp::draw() {
     if (camTex) {
         GLuint texID = CVOpenGLESTextureGetName(camTex);
         ofTexture bg;
-        bg.setUseExternalTextureID(texID);                                // don't let oF delete/realloc it
+
+        // prevent delete/realloc
+        bg.setUseExternalTextureID(texID);
         bg.texData.textureTarget    = CVOpenGLESTextureGetTarget(camTex); // GL_TEXTURE_2D
         bg.texData.width  = bg.texData.tex_w = ofGetWidth();
         bg.texData.height = bg.texData.tex_h = ofGetHeight();
@@ -147,7 +146,7 @@ void ofApp::placeCloudAnchor(){
     matrix_float4x4 camXform = frame.camera.transform;   // value copy of the pose
     CVPixelBufferRef depthMap = frame.estimatedDepthData; //depth image
 
-	
+
     CVPixelBufferLockBaseAddress(depthMap, kCVPixelBufferLock_ReadOnly); //have to lock or else corrupt data
     size_t w = CVPixelBufferGetWidth(depthMap);
     size_t h = CVPixelBufferGetHeight(depthMap);
@@ -217,8 +216,8 @@ void ofApp::placeCloudAnchor(){
         float a = d00*(1-tx) + d10*tx, b = d01*(1-tx) + d11*tx;
         return a*(1-ty) + b*ty;
     };
-	
-    // cam color by normalized UV -> samples  full-res camera
+
+    // Camera color by normalized UV -> samples the full-res camera at the FINER grid positions.
     auto sampleCamUV = [&](float u, float v) -> ofFloatColor {
         if (!haveColor) return ofFloatColor(1.0f, 1.0f, 1.0f);
         int cx = ofClamp((int)(u * camW), 0, (int)camW - 1);
@@ -226,8 +225,6 @@ void ofApp::placeCloudAnchor(){
         float Y  = yCopy[cy * yStride + cx];
         int   ci = (cy/2) * cStride + (cx/2) * 2;
         float Cb = cCopy[ci] - 128.0f, Cr = cCopy[ci + 1] - 128.0f;
-		
-		// standard YCbCr to RGB conversion, not random numbers bih
         return ofFloatColor(
             ofClamp((Y + 1.402f*Cr)             / 255.0f, 0.0f, 1.0f),
             ofClamp((Y - 0.344f*Cb - 0.714f*Cr) / 255.0f, 0.0f, 1.0f),
@@ -274,12 +271,16 @@ void ofApp::placeCloudAnchor(){
 
 //--------------------------------------------------------------
 void ofApp::gotMemoryWarning(){
+	// iOS is about to start killing apps. Drop the whole trail NOW (frees every snapshot's GPU
+	// texture via shared_ptr) so we survive instead of getting jetsam'd. The budget cap should
+	// normally keep us clear of this; this is the last-resort backstop for baseline growth.
 	ofLogWarning("ofApp") << "memory warning -> dumping " << anchorsWithClouds.size() << " clouds";
 	while (!anchorsWithClouds.empty()) removeOldestCloud();
 }
 
 //--------------------------------------------------------------
 void ofApp::touchMoved(ofTouchEventArgs &touch){
+    // Nothing needed — update() handles continuous placement while held (moving or stationary).
 }
 
 //--------------------------------------------------------------
