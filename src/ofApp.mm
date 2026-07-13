@@ -32,7 +32,7 @@ void ofApp::setup() {
 
     // Render at 30fps for a calmer, more filmic cadence (camera still captures 60; we display 30).
     // Also gives GPU headroom -> steadier frame pacing = smoother.
-    ofSetFrameRate(30);
+    ofSetFrameRate(60);
 
     int fontSize = 8;
     if (ofxiOSGetOFWindow()->isRetinaSupportedOnDevice())
@@ -65,62 +65,47 @@ void ofApp::update(){
 
 //--------------------------------------------------------------
 void ofApp::draw() {
-	ofClear(0,0,0, 0);
-    ofEnableAlphaBlending();
+    // PROTOTYPE: trail-only view. Camera background and the NORMAL/GLITCH paths are disabled —
+    // just the voxel feedback trail on black, so we can dial the trail in isolation.
+    ofClear(0, 0, 0, 255);   // black background
 
-    // reuse (BGRA) camera texture (defualt)
-    CVOpenGLESTextureRef camTex = processor->getCameraTexture();
-    if (camTex) {
-        GLuint texID = CVOpenGLESTextureGetName(camTex);
-        ofTexture bg;
-
-        // prevent delete/realloc
-        bg.setUseExternalTextureID(texID);
-        // GL_TEXTURE_2D
-        bg.texData.textureTarget    = CVOpenGLESTextureGetTarget(camTex);
-        bg.texData.width  = bg.texData.tex_w = ofGetWidth();
-        bg.texData.height = bg.texData.tex_h = ofGetHeight();
-        // nomralized coords for TEXTURE_2D
-        bg.texData.tex_u  = bg.texData.tex_t = 1.0f;
-        bg.texData.glInternalFormat = GL_RGBA;
-        // tex already in oF's orientation
-        bg.texData.bFlipTexture = false;
-        bg.texData.bAllocated = true;
-        ofSetColor(255);
-        bg.draw(0, 0, ofGetWidth(), ofGetHeight());
-    }
-
-	// disable person segmentation
-    // processor->drawCameraDebugPersonSegmentation();
-
-    if (session.currentFrame){
-        if (session.currentFrame.camera){
-            camera.begin();
-            processor->setARCameraMatrices();
-
-            // voxels texture real camera color, alpha blend + depth
-            ofEnableBlendMode(OF_BLENDMODE_ALPHA);
-            ofEnableDepthTest();
-            for (auto& ac : anchorsWithClouds) {
-                if (!ac.anchor || !ac.cloud) continue;
-                ofPushMatrix();
-                ofMatrix4x4 mat = convert<matrix_float4x4, ofMatrix4x4>(ac.anchor.transform);
-                ofMultMatrix(mat);
-                ofSetColor(0);                     // black border, cellular
-                if (ac.border) ac.border->draw();
-                ofSetColor(255);                   // white tint -> real per-voxel camera colors show
-                ac.cloud->draw();                  // colored fill on top
-                ofPopMatrix();
-            }
-            ofSetColor(255);
-
-            camera.end();
+    // Draw the voxel clouds with the AR camera matrices. Painter's order (no depth test) so the FBO
+    // stays complete without a depth attachment.
+    auto drawVoxels = [&]() {
+        if (!session.currentFrame || !session.currentFrame.camera) return;
+        camera.begin();
+        processor->setARCameraMatrices();
+        ofEnableBlendMode(OF_BLENDMODE_ALPHA);
+        ofDisableDepthTest();
+        for (auto& ac : anchorsWithClouds) {
+            if (!ac.anchor || !ac.cloud) continue;
+            ofPushMatrix();
+            ofMatrix4x4 mat = convert<matrix_float4x4, ofMatrix4x4>(ac.anchor.transform);
+            ofMultMatrix(mat);
+            ofSetColor(0);   if (ac.border) ac.border->draw();  // black border cells
+            ofSetColor(255); ac.cloud->draw();                  // real per-voxel camera colors
+            ofPopMatrix();
         }
-    }
-	ofDisableAlphaBlending();
-	ofEnableDepthTest();
-    ofDisableDepthTest();
+        ofSetColor(255);
+        camera.end();
+    };
 
+    // GPU-only feedback: dim the FBO toward black, draw fresh voxels, present. No readback = fast.
+    if (!trailAllocated) {
+        trailFbo.allocate(ofGetWidth(), ofGetHeight(), GL_RGBA);   // NO depth (kept it from failing)
+        trailFbo.begin(); ofClear(0,0,0,255); trailFbo.end();
+        trailAllocated = true;
+    }
+    trailFbo.begin();
+        ofEnableAlphaBlending();
+        ofSetColor(0, 0, 0, 255 * (1.0f - TRAIL_FADE));   // dim old content each frame
+        ofDrawRectangle(0, 0, ofGetWidth(), ofGetHeight());
+        drawVoxels();
+    trailFbo.end();
+
+    ofDisableAlphaBlending();
+    ofSetColor(255);
+    trailFbo.draw(0, 0, ofGetWidth(), ofGetHeight());
 }
 
 //--------------------------------------------------------------
@@ -129,10 +114,22 @@ void ofApp::exit() {
 
 //--------------------------------------------------------------
 void ofApp::touchDown(ofTouchEventArgs &touch){
-    // place then update(), press & hold
+    float now = ofGetElapsedTimef();
+
+    // triple-tap cycles the color preset (NORMAL <-> GLITCH). Taps within 0.35s count together.
+    tapCount = (now - lastTapTime < 0.35f) ? tapCount + 1 : 1;
+    lastTapTime = now;
+    if (tapCount >= 3) {
+        colorPreset = (colorPreset + 1) % PRESET_COUNT;
+        tapCount = 0;
+        const char *names[] = { "NORMAL", "GLITCH", "TRAIL" };
+        ofLogNotice("preset") << "preset -> " << names[colorPreset];
+    }
+
+    // place then update() keeps placing while held (press & hold)
     isTouching = true;
     placeCloudAnchor();
-    lastPlaceTime = ofGetElapsedTimef();
+    lastPlaceTime = now;
 }
 
 void ofApp::removeOldestCloud(){
@@ -242,6 +239,10 @@ void ofApp::placeCloudAnchor(){
     const int   gw = (int)((int)w * UP), gh = (int)((int)h * UP);
     const float cellB = sB / (float)UP;              // shrink cells to match the denser spacing
     const float cellF = cellB * (sF / sB);           // keep the same fill/border ratio
+
+    // ---- glitch knobs (baked per voxel at capture) ----
+    const float GLITCH_DU    = (camW > 0) ? 5.0f / (float)camW : 0.0f; // chromatic split: RGB channel offset (bigger = wilder)
+    const float GLITCH_STEPS = 5.0f;                                    // posterize: levels/channel (3 = harsh, 8 = subtle)
     for (int gy = 0; gy < gh; gy++)
         for (int gx = 0; gx < gw; gx++) {
             float fx = (float)gx / UP, fy = (float)gy / UP;
@@ -257,8 +258,18 @@ void ofApp::placeCloudAnchor(){
             border->addVertex(b0); border->addVertex(b1); border->addVertex(b2);
             border->addVertex(b0); border->addVertex(b2); border->addVertex(b3);
 
-            // colored fill quad, full-res camera color at this finer position
-            ofFloatColor col = sampleCamUV(gx/(float)gw, gy/(float)gh);
+            // fill color by preset (triple-tap cycles): NORMAL = plain camera color;
+            // GLITCH = chromatic split (RGB from offset UVs) + posterize.
+            float u = gx/(float)gw, v = gy/(float)gh;
+            ofFloatColor col;
+            if (colorPreset == PRESET_GLITCH) {
+                col = ofFloatColor(sampleCamUV(u+GLITCH_DU, v).r, sampleCamUV(u, v).g, sampleCamUV(u-GLITCH_DU, v).b);
+                col.r = roundf(col.r*(GLITCH_STEPS-1))/(GLITCH_STEPS-1);
+                col.g = roundf(col.g*(GLITCH_STEPS-1))/(GLITCH_STEPS-1);
+                col.b = roundf(col.b*(GLITCH_STEPS-1))/(GLITCH_STEPS-1);
+            } else {
+                col = sampleCamUV(u, v);   // plain real camera color
+            }
             float zf = c.z + zLift;
             glm::vec3 f0(c.x-cellF,c.y-cellF,zf), f1(c.x+cellF,c.y-cellF,zf), f2(c.x+cellF,c.y+cellF,zf), f3(c.x-cellF,c.y+cellF,zf);
             cloud->addVertex(f0); cloud->addColor(col);
