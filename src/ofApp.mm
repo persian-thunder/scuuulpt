@@ -30,6 +30,10 @@ ofApp :: ~ofApp () {
 void ofApp::setup() {
 	ofClear(0,0,0,0);
 
+    // Render at 30fps for a calmer, more filmic cadence (camera still captures 60; we display 30).
+    // Also gives GPU headroom -> steadier frame pacing = smoother.
+    ofSetFrameRate(30);
+
     int fontSize = 8;
     if (ofxiOSGetOFWindow()->isRetinaSupportedOnDevice())
         fontSize *= 2;
@@ -205,7 +209,7 @@ void ofApp::placeCloudAnchor(){
             if (dd > 0.0f) { meanD += dd; cnt++; }
         }
     if (cnt > 0) meanD /= cnt;
-    const float DEPTH_PUNCH = 3.0f;  // 1 = flat; higher = more dramatic relief
+    const float DEPTH_PUNCH = 1.7f;  // 1 = true metric depth; higher = more (exaggerated) relief
 
     // Bilinear depth at a fractional grid position; returns 0 (skip) if ANY neighbor is background,
     // so interpolated voxels never bridge the person's silhouette edge into empty space.
